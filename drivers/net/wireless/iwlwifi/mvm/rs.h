@@ -352,9 +352,8 @@ static inline u8 num_of_ant(u8 mask)
 }
 
 /* Initialize station's rate scaling information after adding station */
-extern void iwl_mvm_rs_rate_init(struct iwl_mvm *mvm,
-				 struct ieee80211_sta *sta,
-				 enum ieee80211_band band);
+void iwl_mvm_rs_rate_init(struct iwl_mvm *mvm, struct ieee80211_sta *sta,
+			  enum ieee80211_band band);
 
 /**
  * iwl_rate_control_register - Register the rate control algorithm callbacks
@@ -366,7 +365,7 @@ extern void iwl_mvm_rs_rate_init(struct iwl_mvm *mvm,
  * ieee80211_register_hw
  *
  */
-extern int iwl_mvm_rate_control_register(void);
+int iwl_mvm_rate_control_register(void);
 
 /**
  * iwl_rate_control_unregister - Unregister the rate control callbacks
@@ -374,7 +373,7 @@ extern int iwl_mvm_rate_control_register(void);
  * This should be called after calling ieee80211_unregister_hw, but before
  * the driver is unloaded.
  */
-extern void iwl_mvm_rate_control_unregister(void);
+void iwl_mvm_rate_control_unregister(void);
 
 struct iwl_mvm_sta;
 
