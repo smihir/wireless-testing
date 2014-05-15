@@ -107,9 +107,6 @@ static void ath_tx_queue_tid(struct ath_txq *txq, struct ath_atx_tid *tid)
 {
 	struct ath_atx_ac *ac = tid->ac;
 
-	if (tid->paused)
-		return;
-
 	if (tid->sched)
 		return;
 
@@ -1407,7 +1404,6 @@ int ath_tx_aggr_start(struct ath_softc *sc, struct ieee80211_sta *sta,
 	ath_tx_tid_change_state(sc, txtid);
 
 	txtid->active = true;
-	txtid->paused = true;
 	*ssn = txtid->seq_start = txtid->seq_next;
 	txtid->bar_index = -1;
 
@@ -1427,7 +1423,6 @@ void ath_tx_aggr_stop(struct ath_softc *sc, struct ieee80211_sta *sta, u16 tid)
 
 	ath_txq_lock(sc, txq);
 	txtid->active = false;
-	txtid->paused = false;
 	ath_tx_flush_tid(sc, txtid);
 	ath_tx_tid_change_state(sc, txtid);
 	ath_txq_unlock_complete(sc, txq);
@@ -1487,7 +1482,7 @@ void ath_tx_aggr_wakeup(struct ath_softc *sc, struct ath_node *an)
 		ath_txq_lock(sc, txq);
 		ac->clear_ps_filter = true;
 
-		if (!tid->paused && ath_tid_has_buffered(tid)) {
+		if (ath_tid_has_buffered(tid)) {
 			ath_tx_queue_tid(txq, tid);
 			ath_txq_schedule(sc, txq);
 		}
@@ -1510,7 +1505,6 @@ void ath_tx_aggr_resume(struct ath_softc *sc, struct ieee80211_sta *sta,
 	ath_txq_lock(sc, txq);
 
 	tid->baw_size = IEEE80211_MIN_AMPDU_BUF << sta->ht_cap.ampdu_factor;
-	tid->paused = false;
 
 	if (ath_tid_has_buffered(tid)) {
 		ath_tx_queue_tid(txq, tid);
@@ -1544,8 +1538,6 @@ void ath9k_release_buffered_frames(struct ieee80211_hw *hw,
 			continue;
 
 		tid = ATH_AN_2_TID(an, i);
-		if (tid->paused)
-			continue;
 
 		ath_txq_lock(sc, tid->ac->txq);
 		while (nframes > 0) {
@@ -1699,7 +1691,7 @@ int ath_cabq_update(struct ath_softc *sc)
 
 	ath9k_hw_get_txq_props(sc->sc_ah, qnum, &qi);
 
-	qi.tqi_readyTime = (cur_conf->beacon_interval *
+	qi.tqi_readyTime = (TU_TO_USEC(cur_conf->beacon_interval) *
 			    ATH_CABQ_READY_TIME) / 100;
 	ath_txq_update(sc, qnum, &qi);
 
@@ -1769,7 +1761,7 @@ bool ath_drain_all_txq(struct ath_softc *sc)
 	int i;
 	u32 npend = 0;
 
-	if (test_bit(SC_OP_INVALID, &sc->sc_flags))
+	if (test_bit(ATH_OP_INVALID, &common->op_flags))
 		return true;
 
 	ath9k_hw_abort_tx_dma(ah);
@@ -1817,11 +1809,12 @@ void ath_tx_cleanupq(struct ath_softc *sc, struct ath_txq *txq)
  */
 void ath_txq_schedule(struct ath_softc *sc, struct ath_txq *txq)
 {
+	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
 	struct ath_atx_ac *ac, *last_ac;
 	struct ath_atx_tid *tid, *last_tid;
 	bool sent = false;
 
-	if (test_bit(SC_OP_HW_RESET, &sc->sc_flags) ||
+	if (test_bit(ATH_OP_HW_RESET, &common->op_flags) ||
 	    list_empty(&txq->axq_acq))
 		return;
 
@@ -1842,9 +1835,6 @@ void ath_txq_schedule(struct ath_softc *sc, struct ath_txq *txq)
 					       list);
 			list_del(&tid->list);
 			tid->sched = false;
-
-			if (tid->paused)
-				continue;
 
 			if (ath_tx_sched_aggr(sc, txq, tid, &stop))
 				sent = true;
@@ -2471,7 +2461,7 @@ static void ath_tx_processq(struct ath_softc *sc, struct ath_txq *txq)
 
 	ath_txq_lock(sc, txq);
 	for (;;) {
-		if (test_bit(SC_OP_HW_RESET, &sc->sc_flags))
+		if (test_bit(ATH_OP_HW_RESET, &common->op_flags))
 			break;
 
 		if (list_empty(&txq->axq_q)) {
@@ -2554,7 +2544,7 @@ void ath_tx_edma_tasklet(struct ath_softc *sc)
 	int status;
 
 	for (;;) {
-		if (test_bit(SC_OP_HW_RESET, &sc->sc_flags))
+		if (test_bit(ATH_OP_HW_RESET, &common->op_flags))
 			break;
 
 		status = ath9k_hw_txprocdesc(ah, NULL, (void *)&ts);
@@ -2697,7 +2687,6 @@ void ath_tx_node_init(struct ath_softc *sc, struct ath_node *an)
 		tid->baw_size  = WME_MAX_BA;
 		tid->baw_head  = tid->baw_tail = 0;
 		tid->sched     = false;
-		tid->paused    = false;
 		tid->active	   = false;
 		__skb_queue_head_init(&tid->buf_q);
 		__skb_queue_head_init(&tid->retry_q);

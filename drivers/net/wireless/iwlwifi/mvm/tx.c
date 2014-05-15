@@ -79,6 +79,7 @@ static void iwl_mvm_set_tx_cmd(struct iwl_mvm *mvm, struct sk_buff *skb,
 	__le16 fc = hdr->frame_control;
 	u32 tx_flags = le32_to_cpu(tx_cmd->tx_flags);
 	u32 len = skb->len + FCS_LEN;
+	u8 ac;
 
 	if (!(info->flags & IEEE80211_TX_CTL_NO_ACK))
 		tx_flags |= TX_CMD_FLG_ACK;
@@ -89,13 +90,6 @@ static void iwl_mvm_set_tx_cmd(struct iwl_mvm *mvm, struct sk_buff *skb,
 		tx_flags |= TX_CMD_FLG_TSF;
 	else if (ieee80211_is_back_req(fc))
 		tx_flags |= TX_CMD_FLG_ACK | TX_CMD_FLG_BAR;
-
-	/* High prio packet (wrt. BT coex) if it is EAPOL, MCAST or MGMT */
-	if (info->band == IEEE80211_BAND_2GHZ &&
-	    (info->control.flags & IEEE80211_TX_CTRL_PORT_CTRL_PROTO ||
-	     is_multicast_ether_addr(hdr->addr1) ||
-	     ieee80211_is_back_req(fc) || ieee80211_is_mgmt(fc)))
-		tx_flags |= TX_CMD_FLG_BT_DIS;
 
 	if (ieee80211_has_morefrags(fc))
 		tx_flags |= TX_CMD_FLG_MORE_FRAG;
@@ -112,6 +106,11 @@ static void iwl_mvm_set_tx_cmd(struct iwl_mvm *mvm, struct sk_buff *skb,
 			tx_flags &= ~TX_CMD_FLG_SEQ_CTL;
 	}
 
+	/* tid_tspec will default to 0 = BE when QOS isn't enabled */
+	ac = tid_to_mac80211_ac[tx_cmd->tid_tspec];
+	tx_flags |= iwl_mvm_bt_coex_tx_prio(mvm, hdr, info, ac) <<
+			TX_CMD_FLG_BT_PRIO_POS;
+
 	if (ieee80211_is_mgmt(fc)) {
 		if (ieee80211_is_assoc_req(fc) || ieee80211_is_reassoc_req(fc))
 			tx_cmd->pm_frame_timeout = cpu_to_le16(3);
@@ -127,9 +126,6 @@ static void iwl_mvm_set_tx_cmd(struct iwl_mvm *mvm, struct sk_buff *skb,
 	} else {
 		tx_cmd->pm_frame_timeout = 0;
 	}
-
-	if (info->flags & IEEE80211_TX_CTL_AMPDU)
-		tx_flags |= TX_CMD_FLG_PROT_REQUIRE;
 
 	if (ieee80211_is_data(fc) && len > mvm->rts_threshold &&
 	    !is_multicast_ether_addr(ieee80211_get_DA(hdr)))
@@ -640,7 +636,11 @@ static void iwl_mvm_rx_tx_cmd_single(struct iwl_mvm *mvm,
 			seq_ctl = le16_to_cpu(hdr->seq_ctrl);
 		}
 
-		ieee80211_tx_status_ni(mvm->hw, skb);
+		BUILD_BUG_ON(ARRAY_SIZE(info->status.status_driver_data) < 1);
+		info->status.status_driver_data[0] =
+				(void *)(uintptr_t)tx_resp->reduced_tpc;
+
+		ieee80211_tx_status(mvm->hw, skb);
 	}
 
 	if (txq_id >= mvm->first_agg_queue) {
@@ -819,6 +819,7 @@ static void iwl_mvm_rx_tx_cmd_agg(struct iwl_mvm *mvm,
 		struct iwl_mvm_sta *mvmsta = iwl_mvm_sta_from_mac80211(sta);
 		mvmsta->tid_data[tid].rate_n_flags =
 			le32_to_cpu(tx_resp->initial_rate);
+		mvmsta->tid_data[tid].reduced_tpc = tx_resp->reduced_tpc;
 	}
 
 	rcu_read_unlock();
@@ -932,6 +933,8 @@ int iwl_mvm_rx_ba_notif(struct iwl_mvm *mvm, struct iwl_rx_cmd_buffer *rxb,
 			info->status.ampdu_len = ba_notif->txed;
 			iwl_mvm_hwrate_to_tx_status(tid_data->rate_n_flags,
 						    info);
+			info->status.status_driver_data[0] =
+				(void *)(uintptr_t)tid_data->reduced_tpc;
 		}
 	}
 
@@ -941,7 +944,7 @@ int iwl_mvm_rx_ba_notif(struct iwl_mvm *mvm, struct iwl_rx_cmd_buffer *rxb,
 
 	while (!skb_queue_empty(&reclaimed_skbs)) {
 		skb = __skb_dequeue(&reclaimed_skbs);
-		ieee80211_tx_status_ni(mvm->hw, skb);
+		ieee80211_tx_status(mvm->hw, skb);
 	}
 
 	return 0;

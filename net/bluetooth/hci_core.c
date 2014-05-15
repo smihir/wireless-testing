@@ -955,14 +955,9 @@ static ssize_t le_auto_conn_write(struct file *file, const char __user *data,
 	if (count < 3)
 		return -EINVAL;
 
-	buf = kzalloc(count, GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
-
-	if (copy_from_user(buf, data, count)) {
-		err = -EFAULT;
-		goto done;
-	}
+	buf = memdup_user(data, count);
+	if (IS_ERR(buf))
+		return PTR_ERR(buf);
 
 	if (memcmp(buf, "add", 3) == 0) {
 		n = sscanf(&buf[4], "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx %hhu %hhu",
@@ -1349,7 +1344,7 @@ static void bredr_setup(struct hci_request *req)
 	hci_req_add(req, HCI_OP_SET_EVENT_FLT, 1, &flt_type);
 
 	/* Connection accept timeout ~20 secs */
-	param = __constant_cpu_to_le16(0x7d00);
+	param = cpu_to_le16(0x7d00);
 	hci_req_add(req, HCI_OP_WRITE_CA_TIMEOUT, 2, &param);
 
 	/* AVM Berlin (31), aka "BlueFRITZ!", reports version 1.2,
@@ -1828,6 +1823,9 @@ static int __hci_init(struct hci_dev *hdev)
 				    &lowpan_debugfs_fops);
 		debugfs_create_file("le_auto_conn", 0644, hdev->debugfs, hdev,
 				    &le_auto_conn_fops);
+		debugfs_create_u16("discov_interleaved_timeout", 0644,
+				   hdev->debugfs,
+				   &hdev->discov_interleaved_timeout);
 	}
 
 	return 0;
@@ -2033,12 +2031,11 @@ bool hci_inquiry_cache_update(struct hci_dev *hdev, struct inquiry_data *data,
 
 	hci_remove_remote_oob_data(hdev, &data->bdaddr);
 
-	if (ssp)
-		*ssp = data->ssp_mode;
+	*ssp = data->ssp_mode;
 
 	ie = hci_inquiry_cache_lookup(hdev, &data->bdaddr);
 	if (ie) {
-		if (ie->data.ssp_mode && ssp)
+		if (ie->data.ssp_mode)
 			*ssp = true;
 
 		if (ie->name_state == NAME_NEEDED &&
@@ -3791,6 +3788,7 @@ struct hci_dev *hci_alloc_dev(void)
 	hdev->le_conn_max_interval = 0x0038;
 
 	hdev->rpa_timeout = HCI_DEFAULT_RPA_TIMEOUT;
+	hdev->discov_interleaved_timeout = DISCOV_INTERLEAVED_TIMEOUT;
 
 	mutex_init(&hdev->lock);
 	mutex_init(&hdev->req_lock);
@@ -5270,7 +5268,7 @@ void hci_req_add_le_passive_scan(struct hci_request *req)
 
 	memset(&enable_cp, 0, sizeof(enable_cp));
 	enable_cp.enable = LE_SCAN_ENABLE;
-	enable_cp.filter_dup = LE_SCAN_FILTER_DUP_DISABLE;
+	enable_cp.filter_dup = LE_SCAN_FILTER_DUP_ENABLE;
 	hci_req_add(req, HCI_OP_LE_SET_SCAN_ENABLE, sizeof(enable_cp),
 		    &enable_cp);
 }
@@ -5313,10 +5311,6 @@ void hci_update_background_scan(struct hci_dev *hdev)
 		 * keep the background scan running.
 		 */
 
-		/* If controller is already scanning we are done. */
-		if (test_bit(HCI_LE_SCAN, &hdev->dev_flags))
-			return;
-
 		/* If controller is connecting, we should not start scanning
 		 * since some controllers are not able to scan and connect at
 		 * the same time.
@@ -5324,6 +5318,12 @@ void hci_update_background_scan(struct hci_dev *hdev)
 		conn = hci_conn_hash_lookup_state(hdev, LE_LINK, BT_CONNECT);
 		if (conn)
 			return;
+
+		/* If controller is currently scanning, we stop it to ensure we
+		 * don't miss any advertising (due to duplicates filter).
+		 */
+		if (test_bit(HCI_LE_SCAN, &hdev->dev_flags))
+			hci_req_add_le_scan_disable(&req);
 
 		hci_req_add_le_passive_scan(&req);
 

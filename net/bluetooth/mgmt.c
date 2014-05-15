@@ -108,6 +108,7 @@ static const u16 mgmt_events[] = {
 	MGMT_EV_DEVICE_UNPAIRED,
 	MGMT_EV_PASSKEY_NOTIFY,
 	MGMT_EV_NEW_IRK,
+	MGMT_EV_NEW_CSRK,
 };
 
 #define CACHE_TIMEOUT	msecs_to_jiffies(2 * 1000)
@@ -212,7 +213,7 @@ static int cmd_status(struct sock *sk, u16 index, u16 cmd, u8 status)
 
 	hdr = (void *) skb_put(skb, sizeof(*hdr));
 
-	hdr->opcode = __constant_cpu_to_le16(MGMT_EV_CMD_STATUS);
+	hdr->opcode = cpu_to_le16(MGMT_EV_CMD_STATUS);
 	hdr->index = cpu_to_le16(index);
 	hdr->len = cpu_to_le16(sizeof(*ev));
 
@@ -243,7 +244,7 @@ static int cmd_complete(struct sock *sk, u16 index, u16 cmd, u8 status,
 
 	hdr = (void *) skb_put(skb, sizeof(*hdr));
 
-	hdr->opcode = __constant_cpu_to_le16(MGMT_EV_CMD_COMPLETE);
+	hdr->opcode = cpu_to_le16(MGMT_EV_CMD_COMPLETE);
 	hdr->index = cpu_to_le16(index);
 	hdr->len = cpu_to_le16(sizeof(*ev) + rp_len);
 
@@ -269,7 +270,7 @@ static int read_version(struct sock *sk, struct hci_dev *hdev, void *data,
 	BT_DBG("sock %p", sk);
 
 	rp.version = MGMT_VERSION;
-	rp.revision = __constant_cpu_to_le16(MGMT_REVISION);
+	rp.revision = cpu_to_le16(MGMT_REVISION);
 
 	return cmd_complete(sk, MGMT_INDEX_NONE, MGMT_OP_READ_VERSION, 0, &rp,
 			    sizeof(rp));
@@ -293,8 +294,8 @@ static int read_commands(struct sock *sk, struct hci_dev *hdev, void *data,
 	if (!rp)
 		return -ENOMEM;
 
-	rp->num_commands = __constant_cpu_to_le16(num_commands);
-	rp->num_events = __constant_cpu_to_le16(num_events);
+	rp->num_commands = cpu_to_le16(num_commands);
+	rp->num_events = cpu_to_le16(num_events);
 
 	for (i = 0, opcode = rp->opcodes; i < num_commands; i++, opcode++)
 		put_unaligned_le16(mgmt_commands[i], opcode);
@@ -857,8 +858,8 @@ static void enable_advertising(struct hci_request *req)
 		return;
 
 	memset(&cp, 0, sizeof(cp));
-	cp.min_interval = __constant_cpu_to_le16(0x0800);
-	cp.max_interval = __constant_cpu_to_le16(0x0800);
+	cp.min_interval = cpu_to_le16(0x0800);
+	cp.max_interval = cpu_to_le16(0x0800);
 	cp.type = connectable ? LE_ADV_IND : LE_ADV_NONCONN_IND;
 	cp.own_address_type = own_addr_type;
 	cp.channel_map = hdev->le_adv_channel_map;
@@ -1180,7 +1181,7 @@ static int mgmt_event(u16 event, struct hci_dev *hdev, void *data, u16 data_len,
 	if (hdev)
 		hdr->index = cpu_to_le16(hdev->id);
 	else
-		hdr->index = __constant_cpu_to_le16(MGMT_INDEX_NONE);
+		hdr->index = cpu_to_le16(MGMT_INDEX_NONE);
 	hdr->len = cpu_to_le16(data_len);
 
 	if (data)
@@ -1492,15 +1493,15 @@ static void write_fast_connectable(struct hci_request *req, bool enable)
 		type = PAGE_SCAN_TYPE_INTERLACED;
 
 		/* 160 msec page scan interval */
-		acp.interval = __constant_cpu_to_le16(0x0100);
+		acp.interval = cpu_to_le16(0x0100);
 	} else {
 		type = PAGE_SCAN_TYPE_STANDARD;	/* default */
 
 		/* default 1.28 sec page scan */
-		acp.interval = __constant_cpu_to_le16(0x0800);
+		acp.interval = cpu_to_le16(0x0800);
 	}
 
-	acp.window = __constant_cpu_to_le16(0x0012);
+	acp.window = cpu_to_le16(0x0012);
 
 	if (__cpu_to_le16(hdev->page_scan_interval) != acp.interval ||
 	    __cpu_to_le16(hdev->page_scan_window) != acp.window)
@@ -2351,7 +2352,7 @@ static int load_link_keys(struct sock *sk, struct hci_dev *hdev, void *data,
 					sizeof(struct mgmt_link_key_info);
 	if (expected_len != len) {
 		BT_ERR("load_link_keys: expected %u bytes, got %u bytes",
-		       len, expected_len);
+		       expected_len, len);
 		return cmd_status(sk, hdev->id, MGMT_OP_LOAD_LINK_KEYS,
 				  MGMT_STATUS_INVALID_PARAMS);
 	}
@@ -2849,10 +2850,7 @@ static int pair_device(struct sock *sk, struct hci_dev *hdev, void *data,
 	}
 
 	sec_level = BT_SECURITY_MEDIUM;
-	if (cp->io_cap == 0x03)
-		auth_type = HCI_AT_DEDICATED_BONDING;
-	else
-		auth_type = HCI_AT_DEDICATED_BONDING_MITM;
+	auth_type = HCI_AT_DEDICATED_BONDING;
 
 	if (cp->addr.type == BDADDR_BREDR) {
 		conn = hci_connect_acl(hdev, &cp->addr.bdaddr, sec_level,
@@ -3350,6 +3348,8 @@ static int mgmt_start_discovery_failed(struct hci_dev *hdev, u8 status)
 
 static void start_discovery_complete(struct hci_dev *hdev, u8 status)
 {
+	unsigned long timeout = 0;
+
 	BT_DBG("status %d", status);
 
 	if (status) {
@@ -3365,13 +3365,11 @@ static void start_discovery_complete(struct hci_dev *hdev, u8 status)
 
 	switch (hdev->discovery.type) {
 	case DISCOV_TYPE_LE:
-		queue_delayed_work(hdev->workqueue, &hdev->le_scan_disable,
-				   DISCOV_LE_TIMEOUT);
+		timeout = msecs_to_jiffies(DISCOV_LE_TIMEOUT);
 		break;
 
 	case DISCOV_TYPE_INTERLEAVED:
-		queue_delayed_work(hdev->workqueue, &hdev->le_scan_disable,
-				   DISCOV_INTERLEAVED_TIMEOUT);
+		timeout = msecs_to_jiffies(hdev->discov_interleaved_timeout);
 		break;
 
 	case DISCOV_TYPE_BREDR:
@@ -3380,6 +3378,11 @@ static void start_discovery_complete(struct hci_dev *hdev, u8 status)
 	default:
 		BT_ERR("Invalid discovery type %d", hdev->discovery.type);
 	}
+
+	if (!timeout)
+		return;
+
+	queue_delayed_work(hdev->workqueue, &hdev->le_scan_disable, timeout);
 }
 
 static int start_discovery(struct sock *sk, struct hci_dev *hdev,
@@ -4427,7 +4430,7 @@ static int load_irks(struct sock *sk, struct hci_dev *hdev, void *cp_data,
 	expected_len = sizeof(*cp) + irk_count * sizeof(struct mgmt_irk_info);
 	if (expected_len != len) {
 		BT_ERR("load_irks: expected %u bytes, got %u bytes",
-		       len, expected_len);
+		       expected_len, len);
 		return cmd_status(sk, hdev->id, MGMT_OP_LOAD_IRKS,
 				  MGMT_STATUS_INVALID_PARAMS);
 	}
@@ -4507,7 +4510,7 @@ static int load_long_term_keys(struct sock *sk, struct hci_dev *hdev,
 					sizeof(struct mgmt_ltk_info);
 	if (expected_len != len) {
 		BT_ERR("load_keys: expected %u bytes, got %u bytes",
-		       len, expected_len);
+		       expected_len, len);
 		return cmd_status(sk, hdev->id, MGMT_OP_LOAD_LONG_TERM_KEYS,
 				  MGMT_STATUS_INVALID_PARAMS);
 	}
@@ -5004,7 +5007,7 @@ void mgmt_new_link_key(struct hci_dev *hdev, struct link_key *key,
 	mgmt_event(MGMT_EV_NEW_LINK_KEY, hdev, &ev, sizeof(ev), NULL);
 }
 
-void mgmt_new_ltk(struct hci_dev *hdev, struct smp_ltk *key)
+void mgmt_new_ltk(struct hci_dev *hdev, struct smp_ltk *key, bool persistent)
 {
 	struct mgmt_ev_new_long_term_key ev;
 
@@ -5025,7 +5028,7 @@ void mgmt_new_ltk(struct hci_dev *hdev, struct smp_ltk *key)
 	    (key->bdaddr.b[5] & 0xc0) != 0xc0)
 		ev.store_hint = 0x00;
 	else
-		ev.store_hint = 0x01;
+		ev.store_hint = persistent;
 
 	bacpy(&ev.key.addr.bdaddr, &key->bdaddr);
 	ev.key.addr.type = link_to_bdaddr(LE_LINK, key->bdaddr_type);
@@ -5070,6 +5073,36 @@ void mgmt_new_irk(struct hci_dev *hdev, struct smp_irk *irk)
 	memcpy(ev.irk.val, irk->val, sizeof(irk->val));
 
 	mgmt_event(MGMT_EV_NEW_IRK, hdev, &ev, sizeof(ev), NULL);
+}
+
+void mgmt_new_csrk(struct hci_dev *hdev, struct smp_csrk *csrk,
+		   bool persistent)
+{
+	struct mgmt_ev_new_csrk ev;
+
+	memset(&ev, 0, sizeof(ev));
+
+	/* Devices using resolvable or non-resolvable random addresses
+	 * without providing an indentity resolving key don't require
+	 * to store signature resolving keys. Their addresses will change
+	 * the next time around.
+	 *
+	 * Only when a remote device provides an identity address
+	 * make sure the signature resolving key is stored. So allow
+	 * static random and public addresses here.
+	 */
+	if (csrk->bdaddr_type == ADDR_LE_DEV_RANDOM &&
+	    (csrk->bdaddr.b[5] & 0xc0) != 0xc0)
+		ev.store_hint = 0x00;
+	else
+		ev.store_hint = persistent;
+
+	bacpy(&ev.key.addr.bdaddr, &csrk->bdaddr);
+	ev.key.addr.type = link_to_bdaddr(LE_LINK, csrk->bdaddr_type);
+	ev.key.master = csrk->master;
+	memcpy(ev.key.val, csrk->val, sizeof(csrk->val));
+
+	mgmt_event(MGMT_EV_NEW_CSRK, hdev, &ev, sizeof(ev), NULL);
 }
 
 static inline u16 eir_append_data(u8 *eir, u16 eir_len, u8 type, u8 *data,
@@ -5295,7 +5328,7 @@ void mgmt_pin_code_neg_reply_complete(struct hci_dev *hdev, bdaddr_t *bdaddr,
 }
 
 int mgmt_user_confirm_request(struct hci_dev *hdev, bdaddr_t *bdaddr,
-			      u8 link_type, u8 addr_type, __le32 value,
+			      u8 link_type, u8 addr_type, u32 value,
 			      u8 confirm_hint)
 {
 	struct mgmt_ev_user_confirm_request ev;
@@ -5305,7 +5338,7 @@ int mgmt_user_confirm_request(struct hci_dev *hdev, bdaddr_t *bdaddr,
 	bacpy(&ev.addr.bdaddr, bdaddr);
 	ev.addr.type = link_to_bdaddr(link_type, addr_type);
 	ev.confirm_hint = confirm_hint;
-	ev.value = value;
+	ev.value = cpu_to_le32(value);
 
 	return mgmt_event(MGMT_EV_USER_CONFIRM_REQUEST, hdev, &ev, sizeof(ev),
 			  NULL);
@@ -5637,8 +5670,9 @@ void mgmt_read_local_oob_data_complete(struct hci_dev *hdev, u8 *hash192,
 }
 
 void mgmt_device_found(struct hci_dev *hdev, bdaddr_t *bdaddr, u8 link_type,
-		       u8 addr_type, u8 *dev_class, s8 rssi, u8 cfm_name, u8
-		       ssp, u8 *eir, u16 eir_len)
+		       u8 addr_type, u8 *dev_class, s8 rssi, u8 cfm_name,
+		       u8 ssp, u8 *eir, u16 eir_len, u8 *scan_rsp,
+		       u8 scan_rsp_len)
 {
 	char buf[512];
 	struct mgmt_ev_device_found *ev = (void *) buf;
@@ -5648,8 +5682,10 @@ void mgmt_device_found(struct hci_dev *hdev, bdaddr_t *bdaddr, u8 link_type,
 	if (!hci_discovery_active(hdev))
 		return;
 
-	/* Leave 5 bytes for a potential CoD field */
-	if (sizeof(*ev) + eir_len + 5 > sizeof(buf))
+	/* Make sure that the buffer is big enough. The 5 extra bytes
+	 * are for the potential CoD field.
+	 */
+	if (sizeof(*ev) + eir_len + scan_rsp_len + 5 > sizeof(buf))
 		return;
 
 	memset(buf, 0, sizeof(buf));
@@ -5665,9 +5701,9 @@ void mgmt_device_found(struct hci_dev *hdev, bdaddr_t *bdaddr, u8 link_type,
 
 	ev->rssi = rssi;
 	if (cfm_name)
-		ev->flags |= __constant_cpu_to_le32(MGMT_DEV_FOUND_CONFIRM_NAME);
+		ev->flags |= cpu_to_le32(MGMT_DEV_FOUND_CONFIRM_NAME);
 	if (!ssp)
-		ev->flags |= __constant_cpu_to_le32(MGMT_DEV_FOUND_LEGACY_PAIRING);
+		ev->flags |= cpu_to_le32(MGMT_DEV_FOUND_LEGACY_PAIRING);
 
 	if (eir_len > 0)
 		memcpy(ev->eir, eir, eir_len);
@@ -5676,8 +5712,11 @@ void mgmt_device_found(struct hci_dev *hdev, bdaddr_t *bdaddr, u8 link_type,
 		eir_len = eir_append_data(ev->eir, eir_len, EIR_CLASS_OF_DEV,
 					  dev_class, 3);
 
-	ev->eir_len = cpu_to_le16(eir_len);
-	ev_size = sizeof(*ev) + eir_len;
+	if (scan_rsp_len > 0)
+		memcpy(ev->eir + eir_len, scan_rsp, scan_rsp_len);
+
+	ev->eir_len = cpu_to_le16(eir_len + scan_rsp_len);
+	ev_size = sizeof(*ev) + eir_len + scan_rsp_len;
 
 	mgmt_event(MGMT_EV_DEVICE_FOUND, hdev, ev, ev_size, NULL);
 }

@@ -159,28 +159,34 @@ int mwifiex_ret_11n_addba_req(struct mwifiex_private *priv,
 	int tid;
 	struct host_cmd_ds_11n_addba_rsp *add_ba_rsp = &resp->params.add_ba_rsp;
 	struct mwifiex_tx_ba_stream_tbl *tx_ba_tbl;
+	u16 block_ack_param_set = le16_to_cpu(add_ba_rsp->block_ack_param_set);
 
 	add_ba_rsp->ssn = cpu_to_le16((le16_to_cpu(add_ba_rsp->ssn))
 			& SSN_MASK);
 
-	tid = (le16_to_cpu(add_ba_rsp->block_ack_param_set)
-		& IEEE80211_ADDBA_PARAM_TID_MASK)
-		>> BLOCKACKPARAM_TID_POS;
-	if (le16_to_cpu(add_ba_rsp->status_code) == BA_RESULT_SUCCESS) {
-		tx_ba_tbl = mwifiex_get_ba_tbl(priv, tid,
-						add_ba_rsp->peer_mac_addr);
-		if (tx_ba_tbl) {
-			dev_dbg(priv->adapter->dev, "info: BA stream complete\n");
-			tx_ba_tbl->ba_status = BA_SETUP_COMPLETE;
-		} else {
-			dev_err(priv->adapter->dev, "BA stream not created\n");
-		}
-	} else {
+	tid = (block_ack_param_set & IEEE80211_ADDBA_PARAM_TID_MASK)
+	       >> BLOCKACKPARAM_TID_POS;
+	if (le16_to_cpu(add_ba_rsp->status_code) != BA_RESULT_SUCCESS) {
 		mwifiex_del_ba_tbl(priv, tid, add_ba_rsp->peer_mac_addr,
 				   TYPE_DELBA_SENT, true);
 		if (add_ba_rsp->add_rsp_result != BA_RESULT_TIMEOUT)
 			priv->aggr_prio_tbl[tid].ampdu_ap =
 				BA_STREAM_NOT_ALLOWED;
+		return 0;
+	}
+
+	tx_ba_tbl = mwifiex_get_ba_tbl(priv, tid, add_ba_rsp->peer_mac_addr);
+	if (tx_ba_tbl) {
+		dev_dbg(priv->adapter->dev, "info: BA stream complete\n");
+		tx_ba_tbl->ba_status = BA_SETUP_COMPLETE;
+		if ((block_ack_param_set & BLOCKACKPARAM_AMSDU_SUPP_MASK) &&
+		    priv->add_ba_param.tx_amsdu &&
+		    (priv->aggr_prio_tbl[tid].amsdu != BA_STREAM_NOT_ALLOWED))
+			tx_ba_tbl->amsdu = true;
+		else
+			tx_ba_tbl->amsdu = false;
+	} else {
+		dev_err(priv->adapter->dev, "BA stream not created\n");
 	}
 
 	return 0;
@@ -339,8 +345,7 @@ mwifiex_cmd_append_11n_tlv(struct mwifiex_private *priv,
 
 			memcpy((u8 *) ht_info +
 			       sizeof(struct mwifiex_ie_types_header),
-			       (u8 *) bss_desc->bcn_ht_oper +
-			       sizeof(struct ieee_types_header),
+			       (u8 *)bss_desc->bcn_ht_oper,
 			       le16_to_cpu(ht_info->header.len));
 
 			if (!(sband->ht_cap.cap &
@@ -540,6 +545,7 @@ int mwifiex_send_addba(struct mwifiex_private *priv, int tid, u8 *peer_mac)
 	u32 tx_win_size = priv->add_ba_param.tx_win_size;
 	static u8 dialog_tok;
 	int ret;
+	u16 block_ack_param_set;
 
 	dev_dbg(priv->adapter->dev, "cmd: %s: tid %d\n", __func__, tid);
 
@@ -558,10 +564,16 @@ int mwifiex_send_addba(struct mwifiex_private *priv, int tid, u8 *peer_mac)
 			tx_win_size = MWIFIEX_11AC_STA_AMPDU_DEF_TXWINSIZE;
 	}
 
-	add_ba_req.block_ack_param_set = cpu_to_le16(
-		(u16) ((tid << BLOCKACKPARAM_TID_POS) |
-		       tx_win_size << BLOCKACKPARAM_WINSIZE_POS |
-		       IMMEDIATE_BLOCK_ACK));
+	block_ack_param_set = (u16)((tid << BLOCKACKPARAM_TID_POS) |
+				    tx_win_size << BLOCKACKPARAM_WINSIZE_POS |
+				    IMMEDIATE_BLOCK_ACK);
+
+	/* enable AMSDU inside AMPDU */
+	if (priv->add_ba_param.tx_amsdu &&
+	    (priv->aggr_prio_tbl[tid].amsdu != BA_STREAM_NOT_ALLOWED))
+		block_ack_param_set |= BLOCKACKPARAM_AMSDU_SUPP_MASK;
+
+	add_ba_req.block_ack_param_set = cpu_to_le16(block_ack_param_set);
 	add_ba_req.block_ack_tmo = cpu_to_le16((u16)priv->add_ba_param.timeout);
 
 	++dialog_tok;
@@ -676,6 +688,7 @@ int mwifiex_get_tx_ba_stream_tbl(struct mwifiex_private *priv,
 		dev_dbg(priv->adapter->dev, "data: %s tid=%d\n",
 			__func__, rx_reo_tbl->tid);
 		memcpy(rx_reo_tbl->ra, tx_ba_tsr_tbl->ra, ETH_ALEN);
+		rx_reo_tbl->amsdu = tx_ba_tsr_tbl->amsdu;
 		rx_reo_tbl++;
 		count++;
 		if (count >= MWIFIEX_MAX_TX_BASTREAM_SUPPORTED)
@@ -731,5 +744,50 @@ void mwifiex_set_ba_params(struct mwifiex_private *priv)
 						MWIFIEX_STA_AMPDU_DEF_RXWINSIZE;
 	}
 
+	priv->add_ba_param.tx_amsdu = true;
+	priv->add_ba_param.rx_amsdu = true;
+
 	return;
+}
+
+u8 mwifiex_get_sec_chan_offset(int chan)
+{
+	u8 sec_offset;
+
+	switch (chan) {
+	case 36:
+	case 44:
+	case 52:
+	case 60:
+	case 100:
+	case 108:
+	case 116:
+	case 124:
+	case 132:
+	case 140:
+	case 149:
+	case 157:
+		sec_offset = IEEE80211_HT_PARAM_CHA_SEC_ABOVE;
+		break;
+	case 40:
+	case 48:
+	case 56:
+	case 64:
+	case 104:
+	case 112:
+	case 120:
+	case 128:
+	case 136:
+	case 144:
+	case 153:
+	case 161:
+		sec_offset = IEEE80211_HT_PARAM_CHA_SEC_BELOW;
+		break;
+	case 165:
+	default:
+		sec_offset = IEEE80211_HT_PARAM_CHA_SEC_NONE;
+		break;
+	}
+
+	return sec_offset;
 }

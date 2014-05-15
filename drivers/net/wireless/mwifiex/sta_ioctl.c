@@ -60,10 +60,12 @@ int mwifiex_wait_queue_complete(struct mwifiex_adapter *adapter,
 	int status;
 
 	/* Wait for completion */
-	status = wait_event_interruptible(adapter->cmd_wait_q.wait,
-					  *(cmd_queued->condition));
-	if (status) {
+	status = wait_event_interruptible_timeout(adapter->cmd_wait_q.wait,
+						  *(cmd_queued->condition),
+						  (12 * HZ));
+	if (status <= 0) {
 		dev_err(adapter->dev, "cmd_wait_q terminated: %d\n", status);
+		mwifiex_cancel_all_pending_cmd(adapter);
 		return status;
 	}
 
@@ -508,6 +510,9 @@ int mwifiex_enable_hs(struct mwifiex_adapter *adapter)
 	memset(&hscfg, 0, sizeof(struct mwifiex_ds_hs_cfg));
 	hscfg.is_invoke_hostcmd = true;
 
+	adapter->hs_enabling = true;
+	mwifiex_cancel_all_pending_cmd(adapter);
+
 	if (mwifiex_set_hs_params(mwifiex_get_priv(adapter,
 						   MWIFIEX_BSS_ROLE_STA),
 				  HostCmd_ACT_GEN_SET, MWIFIEX_SYNC_CMD,
@@ -516,8 +521,9 @@ int mwifiex_enable_hs(struct mwifiex_adapter *adapter)
 		return false;
 	}
 
-	if (wait_event_interruptible(adapter->hs_activate_wait_q,
-				     adapter->hs_activate_wait_q_woken)) {
+	if (wait_event_interruptible_timeout(adapter->hs_activate_wait_q,
+					     adapter->hs_activate_wait_q_woken,
+					     (10 * HZ)) <= 0) {
 		dev_err(adapter->dev, "hs_activate_wait_q terminated\n");
 		return false;
 	}

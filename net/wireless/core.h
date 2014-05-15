@@ -80,13 +80,17 @@ struct cfg80211_registered_device {
 
 	struct cfg80211_coalesce *coalesce;
 
+	spinlock_t destroy_list_lock;
+	struct list_head destroy_list;
+	struct work_struct destroy_work;
+
 	/* must be last because of the way we do wiphy_priv(),
 	 * and it should at least be aligned to NETDEV_ALIGN */
 	struct wiphy wiphy __aligned(NETDEV_ALIGN);
 };
 
 static inline
-struct cfg80211_registered_device *wiphy_to_dev(struct wiphy *wiphy)
+struct cfg80211_registered_device *wiphy_to_rdev(struct wiphy *wiphy)
 {
 	BUG_ON(!wiphy);
 	return container_of(wiphy, struct cfg80211_registered_device, wiphy);
@@ -166,7 +170,6 @@ static inline void wdev_unlock(struct wireless_dev *wdev)
 	mutex_unlock(&wdev->mtx);
 }
 
-#define ASSERT_RDEV_LOCK(rdev) ASSERT_RTNL()
 #define ASSERT_WDEV_LOCK(wdev) lockdep_assert_held(&(wdev)->mtx)
 
 static inline bool cfg80211_has_monitors_only(struct cfg80211_registered_device *rdev)
@@ -233,6 +236,13 @@ struct cfg80211_beacon_registration {
 	u32 nlportid;
 };
 
+struct cfg80211_iface_destroy {
+	struct list_head list;
+	u32 nlportid;
+};
+
+void cfg80211_destroy_ifaces(struct cfg80211_registered_device *rdev);
+
 /* free object */
 void cfg80211_dev_free(struct cfg80211_registered_device *rdev);
 
@@ -241,15 +251,11 @@ int cfg80211_dev_rename(struct cfg80211_registered_device *rdev,
 
 void ieee80211_set_bitrate_flags(struct wiphy *wiphy);
 
-void cfg80211_bss_expire(struct cfg80211_registered_device *dev);
-void cfg80211_bss_age(struct cfg80211_registered_device *dev,
+void cfg80211_bss_expire(struct cfg80211_registered_device *rdev);
+void cfg80211_bss_age(struct cfg80211_registered_device *rdev,
                       unsigned long age_secs);
 
 /* IBSS */
-int __cfg80211_join_ibss(struct cfg80211_registered_device *rdev,
-			 struct net_device *dev,
-			 struct cfg80211_ibss_params *params,
-			 struct cfg80211_cached_keys *connkeys);
 int cfg80211_join_ibss(struct cfg80211_registered_device *rdev,
 		       struct net_device *dev,
 		       struct cfg80211_ibss_params *params,
@@ -283,7 +289,7 @@ int cfg80211_set_mesh_channel(struct cfg80211_registered_device *rdev,
 
 /* AP */
 int cfg80211_stop_ap(struct cfg80211_registered_device *rdev,
-		     struct net_device *dev);
+		     struct net_device *dev, bool notify);
 
 /* MLME */
 int cfg80211_mlme_auth(struct cfg80211_registered_device *rdev,
@@ -402,35 +408,9 @@ void cfg80211_set_dfs_state(struct wiphy *wiphy,
 
 void cfg80211_dfs_channels_update_work(struct work_struct *work);
 
-
-static inline int
-cfg80211_can_change_interface(struct cfg80211_registered_device *rdev,
-			      struct wireless_dev *wdev,
-			      enum nl80211_iftype iftype)
-{
-	return cfg80211_can_use_iftype_chan(rdev, wdev, iftype, NULL,
-					    CHAN_MODE_UNDEFINED, 0);
-}
-
-static inline int
-cfg80211_can_add_interface(struct cfg80211_registered_device *rdev,
-			   enum nl80211_iftype iftype)
-{
-	if (rfkill_blocked(rdev->rfkill))
-		return -ERFKILL;
-
-	return cfg80211_can_change_interface(rdev, NULL, iftype);
-}
-
-static inline int
-cfg80211_can_use_chan(struct cfg80211_registered_device *rdev,
-		      struct wireless_dev *wdev,
-		      struct ieee80211_channel *chan,
-		      enum cfg80211_chan_mode chanmode)
-{
-	return cfg80211_can_use_iftype_chan(rdev, wdev, wdev->iftype,
-					    chan, chanmode, 0);
-}
+unsigned int
+cfg80211_chandef_dfs_cac_time(struct wiphy *wiphy,
+			      const struct cfg80211_chan_def *chandef);
 
 static inline unsigned int elapsed_jiffies_msecs(unsigned long start)
 {

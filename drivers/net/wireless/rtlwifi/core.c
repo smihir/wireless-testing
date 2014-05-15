@@ -982,7 +982,7 @@ static void rtl_op_bss_info_changed(struct ieee80211_hw *hw,
 				u8 keep_alive = 10;
 				rtlpriv->cfg->ops->set_hw_reg(hw,
 						 HW_VAR_KEEP_ALIVE,
-						 (u8 *)(&keep_alive));
+						 &keep_alive);
 
 				rtlpriv->cfg->ops->set_hw_reg(hw,
 						      HW_VAR_H2C_FW_JOINBSSRPT,
@@ -1387,7 +1387,8 @@ static void rtl_op_rfkill_poll(struct ieee80211_hw *hw)
  * before switch channel or power save, or tx buffer packet
  * maybe send after offchannel or rf sleep, this may cause
  * dis-association by AP */
-static void rtl_op_flush(struct ieee80211_hw *hw, u32 queues, bool drop)
+static void rtl_op_flush(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+			 u32 queues, bool drop)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 

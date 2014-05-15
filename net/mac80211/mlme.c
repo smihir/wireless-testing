@@ -1089,7 +1089,7 @@ ieee80211_sta_process_chanswitch(struct ieee80211_sub_if_data *sdata,
 	}
 	chanctx = container_of(rcu_access_pointer(sdata->vif.chanctx_conf),
 			       struct ieee80211_chanctx, conf);
-	if (chanctx->refcount > 1) {
+	if (ieee80211_chanctx_refcount(local, chanctx) > 1) {
 		sdata_info(sdata,
 			   "channel switch with multiple interfaces on the same channel, disconnecting\n");
 		ieee80211_queue_work(&local->hw,
@@ -2783,28 +2783,20 @@ static void ieee80211_rx_bss_info(struct ieee80211_sub_if_data *sdata,
 				  struct ieee802_11_elems *elems)
 {
 	struct ieee80211_local *local = sdata->local;
-	int freq;
 	struct ieee80211_bss *bss;
 	struct ieee80211_channel *channel;
 
 	sdata_assert_lock(sdata);
 
-	if (elems->ds_params)
-		freq = ieee80211_channel_to_frequency(elems->ds_params[0],
-						      rx_status->band);
-	else
-		freq = rx_status->freq;
-
-	channel = ieee80211_get_channel(local->hw.wiphy, freq);
-
-	if (!channel || channel->flags & IEEE80211_CHAN_DISABLED)
+	channel = ieee80211_get_channel(local->hw.wiphy, rx_status->freq);
+	if (!channel)
 		return;
 
 	bss = ieee80211_bss_info_update(local, rx_status, mgmt, len, elems,
 					channel);
 	if (bss) {
-		ieee80211_rx_bss_put(local, bss);
 		sdata->vif.bss_conf.beacon_rate = bss->beacon_rate;
+		ieee80211_rx_bss_put(local, bss);
 	}
 }
 
@@ -3599,6 +3591,38 @@ static void ieee80211_restart_sta_timer(struct ieee80211_sub_if_data *sdata)
 }
 
 #ifdef CONFIG_PM
+void ieee80211_mgd_quiesce(struct ieee80211_sub_if_data *sdata)
+{
+	struct ieee80211_if_managed *ifmgd = &sdata->u.mgd;
+	u8 frame_buf[IEEE80211_DEAUTH_FRAME_LEN];
+
+	sdata_lock(sdata);
+
+	if (ifmgd->auth_data || ifmgd->assoc_data) {
+		const u8 *bssid = ifmgd->auth_data ?
+				ifmgd->auth_data->bss->bssid :
+				ifmgd->assoc_data->bss->bssid;
+
+		/*
+		 * If we are trying to authenticate / associate while suspending,
+		 * cfg80211 won't know and won't actually abort those attempts,
+		 * thus we need to do that ourselves.
+		 */
+		ieee80211_send_deauth_disassoc(sdata, bssid,
+					       IEEE80211_STYPE_DEAUTH,
+					       WLAN_REASON_DEAUTH_LEAVING,
+					       false, frame_buf);
+		if (ifmgd->assoc_data)
+			ieee80211_destroy_assoc_data(sdata, false);
+		if (ifmgd->auth_data)
+			ieee80211_destroy_auth_data(sdata, false);
+		cfg80211_tx_mlme_mgmt(sdata->dev, frame_buf,
+				      IEEE80211_DEAUTH_FRAME_LEN);
+	}
+
+	sdata_unlock(sdata);
+}
+
 void ieee80211_sta_restart(struct ieee80211_sub_if_data *sdata)
 {
 	struct ieee80211_if_managed *ifmgd = &sdata->u.mgd;
@@ -3683,7 +3707,7 @@ int ieee80211_max_network_latency(struct notifier_block *nb,
 	ieee80211_recalc_ps(local, latency_usec);
 	mutex_unlock(&local->iflist_mtx);
 
-	return 0;
+	return NOTIFY_OK;
 }
 
 static u8 ieee80211_ht_vht_rx_chains(struct ieee80211_sub_if_data *sdata,
@@ -4417,37 +4441,41 @@ int ieee80211_mgd_deauth(struct ieee80211_sub_if_data *sdata,
 	struct ieee80211_if_managed *ifmgd = &sdata->u.mgd;
 	u8 frame_buf[IEEE80211_DEAUTH_FRAME_LEN];
 	bool tx = !req->local_state_change;
-	bool report_frame = false;
 
-	sdata_info(sdata,
-		   "deauthenticating from %pM by local choice (Reason: %u=%s)\n",
-		   req->bssid, req->reason_code, ieee80211_get_reason_code_string(req->reason_code));
+	if (ifmgd->auth_data &&
+	    ether_addr_equal(ifmgd->auth_data->bss->bssid, req->bssid)) {
+		sdata_info(sdata,
+			   "aborting authentication with %pM by local choice (Reason: %u=%s)\n",
+			   req->bssid, req->reason_code,
+			   ieee80211_get_reason_code_string(req->reason_code));
 
-	if (ifmgd->auth_data) {
 		drv_mgd_prepare_tx(sdata->local, sdata);
 		ieee80211_send_deauth_disassoc(sdata, req->bssid,
 					       IEEE80211_STYPE_DEAUTH,
 					       req->reason_code, tx,
 					       frame_buf);
 		ieee80211_destroy_auth_data(sdata, false);
+		cfg80211_tx_mlme_mgmt(sdata->dev, frame_buf,
+				      IEEE80211_DEAUTH_FRAME_LEN);
 
-		report_frame = true;
-		goto out;
+		return 0;
 	}
 
 	if (ifmgd->associated &&
 	    ether_addr_equal(ifmgd->associated->bssid, req->bssid)) {
+		sdata_info(sdata,
+			   "deauthenticating from %pM by local choice (Reason: %u=%s)\n",
+			   req->bssid, req->reason_code,
+			   ieee80211_get_reason_code_string(req->reason_code));
+
 		ieee80211_set_disassoc(sdata, IEEE80211_STYPE_DEAUTH,
 				       req->reason_code, tx, frame_buf);
-		report_frame = true;
-	}
-
- out:
-	if (report_frame)
 		cfg80211_tx_mlme_mgmt(sdata->dev, frame_buf,
 				      IEEE80211_DEAUTH_FRAME_LEN);
+		return 0;
+	}
 
-	return 0;
+	return -ENOTCONN;
 }
 
 int ieee80211_mgd_disassoc(struct ieee80211_sub_if_data *sdata,

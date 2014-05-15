@@ -62,16 +62,13 @@ struct ath10k;
 
 struct ath10k_skb_cb {
 	dma_addr_t paddr;
-	bool is_mapped;
-	bool is_aborted;
 	u8 vdev_id;
 
 	struct {
 		u8 tid;
 		bool is_offchan;
-
-		u8 frag_len;
-		u8 pad_len;
+		struct ath10k_htt_txbuf *txbuf;
+		u32 txbuf_paddr;
 	} __packed htt;
 
 	struct {
@@ -85,32 +82,6 @@ static inline struct ath10k_skb_cb *ATH10K_SKB_CB(struct sk_buff *skb)
 	BUILD_BUG_ON(sizeof(struct ath10k_skb_cb) >
 		     IEEE80211_TX_INFO_DRIVER_DATA_SIZE);
 	return (struct ath10k_skb_cb *)&IEEE80211_SKB_CB(skb)->driver_data;
-}
-
-static inline int ath10k_skb_map(struct device *dev, struct sk_buff *skb)
-{
-	if (ATH10K_SKB_CB(skb)->is_mapped)
-		return -EINVAL;
-
-	ATH10K_SKB_CB(skb)->paddr = dma_map_single(dev, skb->data, skb->len,
-						   DMA_TO_DEVICE);
-
-	if (unlikely(dma_mapping_error(dev, ATH10K_SKB_CB(skb)->paddr)))
-		return -EIO;
-
-	ATH10K_SKB_CB(skb)->is_mapped = true;
-	return 0;
-}
-
-static inline int ath10k_skb_unmap(struct device *dev, struct sk_buff *skb)
-{
-	if (!ATH10K_SKB_CB(skb)->is_mapped)
-		return -EINVAL;
-
-	dma_unmap_single(dev, ATH10K_SKB_CB(skb)->paddr, skb->len,
-			 DMA_TO_DEVICE);
-	ATH10K_SKB_CB(skb)->is_mapped = false;
-	return 0;
 }
 
 static inline u32 host_interest_item_address(u32 item_offset)
@@ -148,6 +119,7 @@ struct ath10k_peer_stat {
 	u8 peer_macaddr[ETH_ALEN];
 	u32 peer_rssi;
 	u32 peer_tx_rate;
+	u32 peer_rx_rate; /* 10x only */
 };
 
 struct ath10k_target_stats {
@@ -159,6 +131,12 @@ struct ath10k_target_stats {
 	u32 cycle_count;
 	u32 phy_err_count;
 	u32 chan_tx_power;
+	u32 ack_rx_bad;
+	u32 rts_bad;
+	u32 rts_good;
+	u32 fcs_bad;
+	u32 no_beacons;
+	u32 mib_int_count;
 
 	/* PDEV TX stats */
 	s32 comp_queued;
@@ -288,6 +266,9 @@ struct ath10k_vif {
 
 	u8 fixed_rate;
 	u8 fixed_nss;
+	u8 force_sgi;
+	bool use_cts_prot;
+	int num_legacy_stations;
 };
 
 struct ath10k_vif_iter {
@@ -447,12 +428,17 @@ struct ath10k {
 	struct cfg80211_chan_def chandef;
 
 	int free_vdev_map;
+	bool promisc;
+	bool monitor;
 	int monitor_vdev_id;
-	bool monitor_enabled;
-	bool monitor_present;
+	bool monitor_started;
 	unsigned int filter_flags;
 	unsigned long dev_flags;
 	u32 dfs_block_radar_events;
+
+	/* protected by conf_mutex */
+	bool radar_enabled;
+	int num_started_vdevs;
 
 	struct wmi_pdev_set_wmm_params_arg wmm_params;
 	struct completion install_key_done;

@@ -29,9 +29,6 @@
 #define MWIFIEX_MAX_CHANNELS_PER_SPECIFIC_SCAN   14
 
 #define MWIFIEX_DEF_CHANNELS_PER_SCAN_CMD	4
-#define MWIFIEX_LIMIT_1_CHANNEL_PER_SCAN_CMD	15
-#define MWIFIEX_LIMIT_2_CHANNELS_PER_SCAN_CMD	27
-#define MWIFIEX_LIMIT_3_CHANNELS_PER_SCAN_CMD	35
 
 /* Memory needed to store a max sized Channel List TLV for a firmware scan */
 #define CHAN_TLV_MAX_SIZE  (sizeof(struct mwifiex_ie_types_header)         \
@@ -591,10 +588,12 @@ mwifiex_scan_channel_list(struct mwifiex_private *priv,
 			  *chan_tlv_out,
 			  struct mwifiex_chan_scan_param_set *scan_chan_list)
 {
+	struct mwifiex_adapter *adapter = priv->adapter;
 	int ret = 0;
 	struct mwifiex_chan_scan_param_set *tmp_chan_list;
 	struct mwifiex_chan_scan_param_set *start_chan;
-
+	struct cmd_ctrl_node *cmd_node, *tmp_node;
+	unsigned long flags;
 	u32 tlv_idx, rates_size, cmd_no;
 	u32 total_scan_time;
 	u32 done_early;
@@ -748,8 +747,19 @@ mwifiex_scan_channel_list(struct mwifiex_private *priv,
 		scan_cfg_out->tlv_buf_len -=
 			    sizeof(struct mwifiex_ie_types_header) + rates_size;
 
-		if (ret)
+		if (ret) {
+			spin_lock_irqsave(&adapter->scan_pending_q_lock, flags);
+			list_for_each_entry_safe(cmd_node, tmp_node,
+						 &adapter->scan_pending_q,
+						 list) {
+				list_del(&cmd_node->list);
+				cmd_node->wait_q_enabled = false;
+				mwifiex_insert_cmd_to_free_q(adapter, cmd_node);
+			}
+			spin_unlock_irqrestore(&adapter->scan_pending_q_lock,
+					       flags);
 			break;
+		}
 	}
 
 	if (ret)
@@ -1042,20 +1052,10 @@ mwifiex_config_scan(struct mwifiex_private *priv,
 
 	/*
 	 * In associated state we will reduce the number of channels scanned per
-	 * scan command to avoid any traffic delay/loss. This number is decided
-	 * based on total number of channels to be scanned due to constraints
-	 * of command buffers.
+	 * scan command to 1 to avoid any traffic delay/loss.
 	 */
-	if (priv->media_connected) {
-		if (chan_num < MWIFIEX_LIMIT_1_CHANNEL_PER_SCAN_CMD)
+	if (priv->media_connected)
 			*max_chan_per_scan = 1;
-		else if (chan_num < MWIFIEX_LIMIT_2_CHANNELS_PER_SCAN_CMD)
-			*max_chan_per_scan = 2;
-		else if (chan_num < MWIFIEX_LIMIT_3_CHANNELS_PER_SCAN_CMD)
-			*max_chan_per_scan = 3;
-		else
-			*max_chan_per_scan = 4;
-	}
 }
 
 /*
@@ -1340,23 +1340,17 @@ int mwifiex_update_bss_desc_with_ie(struct mwifiex_adapter *adapter,
 					      bss_entry->beacon_buf);
 			break;
 		case WLAN_EID_BSS_COEX_2040:
-			bss_entry->bcn_bss_co_2040 = current_ptr +
-				sizeof(struct ieee_types_header);
-			bss_entry->bss_co_2040_offset = (u16) (current_ptr +
-					sizeof(struct ieee_types_header) -
-						bss_entry->beacon_buf);
+			bss_entry->bcn_bss_co_2040 = current_ptr;
+			bss_entry->bss_co_2040_offset =
+				(u16) (current_ptr - bss_entry->beacon_buf);
 			break;
 		case WLAN_EID_EXT_CAPABILITY:
-			bss_entry->bcn_ext_cap = current_ptr +
-				sizeof(struct ieee_types_header);
-			bss_entry->ext_cap_offset = (u16) (current_ptr +
-					sizeof(struct ieee_types_header) -
-					bss_entry->beacon_buf);
+			bss_entry->bcn_ext_cap = current_ptr;
+			bss_entry->ext_cap_offset =
+				(u16) (current_ptr - bss_entry->beacon_buf);
 			break;
 		case WLAN_EID_OPMODE_NOTIF:
-			bss_entry->oper_mode =
-				(void *)(current_ptr +
-					 sizeof(struct ieee_types_header));
+			bss_entry->oper_mode = (void *)current_ptr;
 			bss_entry->oper_mode_offset =
 					(u16)((u8 *)bss_entry->oper_mode -
 					      bss_entry->beacon_buf);
@@ -1653,7 +1647,7 @@ mwifiex_parse_single_response_buf(struct mwifiex_private *priv, u8 **bss_info,
 	curr_bcn_bytes -= ETH_ALEN;
 
 	if (!ext_scan) {
-		rssi = (s32) *(u8 *)current_ptr;
+		rssi = (s32) *current_ptr;
 		rssi = (-rssi) * 100;		/* Convert dBm to mBm */
 		current_ptr += sizeof(u8);
 		curr_bcn_bytes -= sizeof(u8);

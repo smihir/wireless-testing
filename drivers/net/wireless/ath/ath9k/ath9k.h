@@ -23,8 +23,8 @@
 #include <linux/leds.h>
 #include <linux/completion.h>
 
-#include "debug.h"
 #include "common.h"
+#include "debug.h"
 #include "mci.h"
 #include "dfs.h"
 #include "spectral.h"
@@ -113,6 +113,9 @@ int ath_descdma_setup(struct ath_softc *sc, struct ath_descdma *dd,
 #define ATH_TX_COMPLETE_POLL_INT   1000
 #define ATH_TXFIFO_DEPTH           8
 #define ATH_TX_ERROR               0x01
+
+/* Stop tx traffic 1ms before the GO goes away */
+#define ATH_P2P_PS_STOP_TIME       1000
 
 #define IEEE80211_SEQ_SEQ_SHIFT    4
 #define IEEE80211_SEQ_MAX          4096
@@ -251,7 +254,6 @@ struct ath_atx_tid {
 
 	s8 bar_index;
 	bool sched;
-	bool paused;
 	bool active;
 };
 
@@ -367,11 +369,15 @@ void ath9k_release_buffered_frames(struct ieee80211_hw *hw,
 /********/
 
 struct ath_vif {
+	struct ieee80211_vif *vif;
 	struct ath_node mcast_node;
 	int av_bslot;
 	bool primary_sta_vif;
 	__le64 tsf_adjust; /* TSF adjustment for staggered beacons */
 	struct ath_buf *av_bcbuf;
+
+	/* P2P Client */
+	struct ieee80211_noa_data noa;
 };
 
 struct ath9k_vif_iter_data {
@@ -403,19 +409,9 @@ void ath9k_calculate_iter_data(struct ieee80211_hw *hw,
 #define	ATH_BCBUF               	8
 #define ATH_DEFAULT_BINTVAL     	100 /* TU */
 #define ATH_DEFAULT_BMISS_LIMIT 	10
-#define IEEE80211_MS_TO_TU(x)           (((x) * 1000) / 1024)
 
 #define TSF_TO_TU(_h,_l) \
 	((((u32)(_h)) << 22) | (((u32)(_l)) >> 10))
-
-struct ath_beacon_config {
-	int beacon_interval;
-	u16 dtim_period;
-	u16 bmiss_timeout;
-	u8 dtim_count;
-	bool enable_beacon;
-	bool ibss_creator;
-};
 
 struct ath_beacon {
 	enum {
@@ -426,11 +422,9 @@ struct ath_beacon {
 
 	u32 beaconq;
 	u32 bmisscnt;
-	u32 bc_tstamp;
 	struct ieee80211_vif *bslot[ATH_BCBUF];
 	int slottime;
 	int slotupdate;
-	struct ath9k_tx_queue_info beacon_qi;
 	struct ath_descdma bdma;
 	struct ath_txq *cabq;
 	struct list_head bbuf;
@@ -476,6 +470,8 @@ int ath_update_survey_stats(struct ath_softc *sc);
 void ath_update_survey_nf(struct ath_softc *sc, int channel);
 void ath9k_queue_reset(struct ath_softc *sc, enum ath_reset_type type);
 void ath_ps_full_sleep(unsigned long data);
+void ath9k_p2p_ps_timer(void *priv);
+void ath9k_update_p2p_ps(struct ath_softc *sc, struct ieee80211_vif *vif);
 
 /**********/
 /* BTCOEX */
@@ -697,15 +693,6 @@ void ath_ant_comb_scan(struct ath_softc *sc, struct ath_rx_status *rs);
 #define ATH_TXPOWER_MAX         100     /* .5 dBm units */
 #define MAX_GTT_CNT             5
 
-enum sc_op_flags {
-	SC_OP_INVALID,
-	SC_OP_BEACONS,
-	SC_OP_ANI_RUN,
-	SC_OP_PRIM_STA_VIF,
-	SC_OP_HW_RESET,
-	SC_OP_SCANNING,
-};
-
 /* Powersave flags */
 #define PS_WAIT_FOR_BEACON        BIT(0)
 #define PS_WAIT_FOR_CAB           BIT(1)
@@ -735,7 +722,9 @@ struct ath_softc {
 	struct completion paprd_complete;
 	wait_queue_head_t tx_wait;
 
-	unsigned long sc_flags;
+	struct ath_gen_timer *p2p_ps_timer;
+	struct ath_vif *p2p_ps_vif;
+
 	unsigned long driver_data;
 
 	u8 gtt_cnt;

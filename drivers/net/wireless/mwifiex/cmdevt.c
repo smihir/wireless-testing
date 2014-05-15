@@ -277,11 +277,11 @@ static int mwifiex_dnld_sleep_confirm_cmd(struct mwifiex_adapter *adapter)
 
 	priv = mwifiex_get_priv(adapter, MWIFIEX_BSS_ROLE_ANY);
 
+	adapter->seq_num++;
 	sleep_cfm_buf->seq_num =
 		cpu_to_le16((HostCmd_SET_SEQ_NO_BSS_INFO
 					(adapter->seq_num, priv->bss_num,
 					 priv->bss_type)));
-	adapter->seq_num++;
 
 	if (adapter->iface_type == MWIFIEX_USB) {
 		sleep_cfm_tmp =
@@ -506,6 +506,11 @@ int mwifiex_send_cmd(struct mwifiex_private *priv, u16 cmd_no,
 
 	if (adapter->is_suspended) {
 		dev_err(adapter->dev, "PREP_CMD: device in suspended state\n");
+		return -1;
+	}
+
+	if (adapter->hs_enabling && cmd_no != HostCmd_CMD_802_11_HS_CFG_ENH) {
+		dev_err(adapter->dev, "PREP_CMD: host entering sleep state\n");
 		return -1;
 	}
 
@@ -950,8 +955,6 @@ mwifiex_cmd_timeout_func(unsigned long function_context)
 			adapter->cmd_wait_q.status = -ETIMEDOUT;
 			wake_up_interruptible(&adapter->cmd_wait_q.wait);
 			mwifiex_cancel_pending_ioctl(adapter);
-			/* reset cmd_sent flag to unblock new commands */
-			adapter->cmd_sent = false;
 		}
 	}
 	if (adapter->hw_status == MWIFIEX_HW_STATUS_INITIALIZING)
@@ -976,11 +979,10 @@ mwifiex_cancel_all_pending_cmd(struct mwifiex_adapter *adapter)
 	struct mwifiex_private *priv;
 	int i;
 
+	spin_lock_irqsave(&adapter->mwifiex_cmd_lock, cmd_flags);
 	/* Cancel current cmd */
 	if ((adapter->curr_cmd) && (adapter->curr_cmd->wait_q_enabled)) {
-		spin_lock_irqsave(&adapter->mwifiex_cmd_lock, flags);
 		adapter->curr_cmd->wait_q_enabled = false;
-		spin_unlock_irqrestore(&adapter->mwifiex_cmd_lock, flags);
 		adapter->cmd_wait_q.status = -1;
 		mwifiex_complete_cmd(adapter, adapter->curr_cmd);
 	}
@@ -1000,6 +1002,7 @@ mwifiex_cancel_all_pending_cmd(struct mwifiex_adapter *adapter)
 		spin_lock_irqsave(&adapter->cmd_pending_q_lock, flags);
 	}
 	spin_unlock_irqrestore(&adapter->cmd_pending_q_lock, flags);
+	spin_unlock_irqrestore(&adapter->mwifiex_cmd_lock, cmd_flags);
 
 	/* Cancel all pending scan command */
 	spin_lock_irqsave(&adapter->scan_pending_q_lock, flags);
@@ -1502,6 +1505,7 @@ int mwifiex_ret_get_hw_spec(struct mwifiex_private *priv,
 	}
 
 	adapter->fw_release_number = le32_to_cpu(hw_spec->fw_release_number);
+	adapter->fw_api_ver = (adapter->fw_release_number >> 16) & 0xff;
 	adapter->number_of_antenna = le16_to_cpu(hw_spec->number_of_antenna);
 
 	if (le32_to_cpu(hw_spec->dot_11ac_dev_cap)) {

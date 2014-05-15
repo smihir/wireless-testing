@@ -120,6 +120,7 @@ static int mwifiex_pcie_suspend(struct device *dev)
 
 	/* Indicate device suspended */
 	adapter->is_suspended = true;
+	adapter->hs_enabling = false;
 
 	return 0;
 }
@@ -219,9 +220,6 @@ static void mwifiex_pcie_remove(struct pci_dev *pdev)
 	adapter = card->adapter;
 	if (!adapter || !adapter->priv_num)
 		return;
-
-	/* In case driver is removed when asynchronous FW load is in progress */
-	wait_for_completion(&adapter->fw_load);
 
 	if (user_rmmod) {
 #ifdef CONFIG_PM_SLEEP
@@ -325,6 +323,30 @@ static void mwifiex_pcie_dev_wakeup_delay(struct mwifiex_adapter *adapter)
 	}
 
 	return;
+}
+
+static void mwifiex_delay_for_sleep_cookie(struct mwifiex_adapter *adapter,
+					   u32 max_delay_loop_cnt)
+{
+	struct pcie_service_card *card = adapter->card;
+	u8 *buffer;
+	u32 sleep_cookie, count;
+
+	for (count = 0; count < max_delay_loop_cnt; count++) {
+		buffer = card->cmdrsp_buf->data - INTF_HEADER_LEN;
+		sleep_cookie = *(u32 *)buffer;
+
+		if (sleep_cookie == MWIFIEX_DEF_SLEEP_COOKIE) {
+			dev_dbg(adapter->dev,
+				"sleep cookie found at count %d\n", count);
+			break;
+		}
+		usleep_range(20, 30);
+	}
+
+	if (count >= max_delay_loop_cnt)
+		dev_dbg(adapter->dev,
+			"max count reached while accessing sleep cookie\n");
 }
 
 /* This function wakes up the card by reading fw_status register. */
@@ -1009,7 +1031,7 @@ static int mwifiex_pcie_send_data_complete(struct mwifiex_adapter *adapter)
 		card->tx_buf_list[wrdoneidx] = NULL;
 
 		if (reg->pfu_enabled) {
-			desc2 = (void *)card->txbd_ring[wrdoneidx];
+			desc2 = card->txbd_ring[wrdoneidx];
 			memset(desc2, 0, sizeof(*desc2));
 		} else {
 			desc = card->txbd_ring[wrdoneidx];
@@ -1094,7 +1116,7 @@ mwifiex_pcie_send_data(struct mwifiex_adapter *adapter, struct sk_buff *skb,
 		card->tx_buf_list[wrindx] = skb;
 
 		if (reg->pfu_enabled) {
-			desc2 = (void *)card->txbd_ring[wrindx];
+			desc2 = card->txbd_ring[wrindx];
 			desc2->paddr = buf_pa;
 			desc2->len = (u16)skb->len;
 			desc2->frag_len = (u16)skb->len;
@@ -1254,7 +1276,7 @@ static int mwifiex_pcie_process_recv_data(struct mwifiex_adapter *adapter)
 		card->rx_buf_list[rd_index] = skb_tmp;
 
 		if (reg->pfu_enabled) {
-			desc2 = (void *)card->rxbd_ring[rd_index];
+			desc2 = card->rxbd_ring[rd_index];
 			desc2->paddr = buf_pa;
 			desc2->len = skb_tmp->len;
 			desc2->frag_len = skb_tmp->len;
@@ -1539,6 +1561,8 @@ static int mwifiex_pcie_process_cmd_complete(struct mwifiex_adapter *adapter)
 					 "Write register failed\n");
 				return -1;
 			}
+			mwifiex_delay_for_sleep_cookie(adapter,
+						       MWIFIEX_MAX_DELAY_COUNT);
 			while (reg->sleep_cookie && (count++ < 10) &&
 			       mwifiex_pcie_ok_to_access_hw(adapter))
 				usleep_range(50, 60);

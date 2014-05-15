@@ -64,6 +64,7 @@
 
 #include "iwl-debug.h"
 #include "iwl-io.h"
+#include "iwl-prph.h"
 
 #include "mvm.h"
 #include "fw-api-rs.h"
@@ -469,6 +470,8 @@ void iwl_mvm_dump_nic_error_log(struct iwl_mvm *mvm)
 			mvm->status, table.valid);
 	}
 
+	/* Do not change this output - scripts rely on it */
+
 	IWL_ERR(mvm, "Loaded firmware version: %s\n", mvm->fw->fw_version);
 
 	trace_iwlwifi_dev_ucode_error(trans->dev, table.error_id, table.tsf_low,
@@ -516,34 +519,70 @@ void iwl_mvm_dump_nic_error_log(struct iwl_mvm *mvm)
 		iwl_mvm_dump_umac_error_log(mvm);
 }
 
-void iwl_mvm_dump_sram(struct iwl_mvm *mvm)
+#ifdef CONFIG_IWLWIFI_DEBUGFS
+void iwl_mvm_fw_error_sram_dump(struct iwl_mvm *mvm)
 {
 	const struct fw_img *img;
-	int ofs, len = 0;
-	int i;
-	__le32 *buf;
+	u32 ofs, sram_len;
+	void *sram;
 
-	if (!mvm->ucode_loaded)
+	if (!mvm->ucode_loaded || mvm->fw_error_sram || mvm->fw_error_dump)
 		return;
 
 	img = &mvm->fw->img[mvm->cur_ucode];
 	ofs = img->sec[IWL_UCODE_SECTION_DATA].offset;
-	len = img->sec[IWL_UCODE_SECTION_DATA].len;
+	sram_len = img->sec[IWL_UCODE_SECTION_DATA].len;
 
-	buf = kzalloc(len, GFP_ATOMIC);
-	if (!buf)
+	sram = kzalloc(sram_len, GFP_ATOMIC);
+	if (!sram)
 		return;
 
-	iwl_trans_read_mem_bytes(mvm->trans, ofs, buf, len);
-	len = len >> 2;
-	for (i = 0; i < len; i++) {
-		IWL_ERR(mvm, "0x%08X\n", le32_to_cpu(buf[i]));
-		/* Add a small delay to let syslog catch up */
-		udelay(10);
+	iwl_trans_read_mem_bytes(mvm->trans, ofs, sram, sram_len);
+	mvm->fw_error_sram = sram;
+	mvm->fw_error_sram_len = sram_len;
+}
+
+void iwl_mvm_fw_error_rxf_dump(struct iwl_mvm *mvm)
+{
+	int i, reg_val;
+	unsigned long flags;
+
+	if (!mvm->ucode_loaded || mvm->fw_error_rxf || mvm->fw_error_dump)
+		return;
+
+	/* reading buffer size */
+	reg_val = iwl_trans_read_prph(mvm->trans, RXF_SIZE_ADDR);
+	mvm->fw_error_rxf_len =
+		(reg_val & RXF_SIZE_BYTE_CNT_MSK) >> RXF_SIZE_BYTE_CND_POS;
+
+	/* the register holds the value divided by 128 */
+	mvm->fw_error_rxf_len = mvm->fw_error_rxf_len << 7;
+
+	if (!mvm->fw_error_rxf_len)
+		return;
+
+	mvm->fw_error_rxf =  kzalloc(mvm->fw_error_rxf_len, GFP_ATOMIC);
+	if (!mvm->fw_error_rxf) {
+		mvm->fw_error_rxf_len = 0;
+		return;
 	}
 
-	kfree(buf);
+	if (!iwl_trans_grab_nic_access(mvm->trans, false, &flags)) {
+		kfree(mvm->fw_error_rxf);
+		mvm->fw_error_rxf = NULL;
+		mvm->fw_error_rxf_len = 0;
+		return;
+	}
+
+	for (i = 0; i < (mvm->fw_error_rxf_len / sizeof(u32)); i++) {
+		iwl_trans_write_prph(mvm->trans, RXF_LD_FENCE_OFFSET_ADDR,
+				     i * sizeof(u32));
+		mvm->fw_error_rxf[i] =
+			iwl_trans_read_prph(mvm->trans, RXF_FIFO_RD_FENCE_ADDR);
+	}
+	iwl_trans_release_nic_access(mvm->trans, &flags);
 }
+#endif
 
 /**
  * iwl_mvm_send_lq_cmd() - Send link quality command
@@ -619,6 +658,9 @@ int iwl_mvm_update_low_latency(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
 
 	lockdep_assert_held(&mvm->mutex);
 
+	if (mvmvif->low_latency == value)
+		return 0;
+
 	mvmvif->low_latency = value;
 
 	res = iwl_mvm_update_quotas(mvm, NULL);
@@ -628,4 +670,42 @@ int iwl_mvm_update_low_latency(struct iwl_mvm *mvm, struct ieee80211_vif *vif,
 	iwl_mvm_bt_coex_vif_change(mvm);
 
 	return iwl_mvm_power_update_mac(mvm, vif);
+}
+
+static void iwl_mvm_ll_iter(void *_data, u8 *mac, struct ieee80211_vif *vif)
+{
+	bool *result = _data;
+
+	if (iwl_mvm_vif_low_latency(iwl_mvm_vif_from_mac80211(vif)))
+		*result = true;
+}
+
+bool iwl_mvm_low_latency(struct iwl_mvm *mvm)
+{
+	bool result = false;
+
+	ieee80211_iterate_active_interfaces_atomic(
+			mvm->hw, IEEE80211_IFACE_ITER_NORMAL,
+			iwl_mvm_ll_iter, &result);
+
+	return result;
+}
+
+static void iwl_mvm_idle_iter(void *_data, u8 *mac, struct ieee80211_vif *vif)
+{
+	bool *idle = _data;
+
+	if (!vif->bss_conf.idle)
+		*idle = false;
+}
+
+bool iwl_mvm_is_idle(struct iwl_mvm *mvm)
+{
+	bool idle = true;
+
+	ieee80211_iterate_active_interfaces_atomic(
+			mvm->hw, IEEE80211_IFACE_ITER_NORMAL,
+			iwl_mvm_idle_iter, &idle);
+
+	return idle;
 }

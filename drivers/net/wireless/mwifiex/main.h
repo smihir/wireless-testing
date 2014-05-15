@@ -116,7 +116,7 @@ enum {
 #define MWIFIEX_TYPE_DATA				0
 #define MWIFIEX_TYPE_EVENT				3
 
-#define MAX_BITMAP_RATES_SIZE			10
+#define MAX_BITMAP_RATES_SIZE			18
 
 #define MAX_CHANNEL_BAND_BG     14
 #define MAX_CHANNEL_BAND_A      165
@@ -192,6 +192,8 @@ struct mwifiex_add_ba_param {
 	u32 tx_win_size;
 	u32 rx_win_size;
 	u32 timeout;
+	u8 tx_amsdu;
+	u8 rx_amsdu;
 };
 
 struct mwifiex_tx_aggr {
@@ -560,6 +562,7 @@ struct mwifiex_tx_ba_stream_tbl {
 	int tid;
 	u8 ra[ETH_ALEN];
 	enum mwifiex_ba_status ba_status;
+	u8 amsdu;
 };
 
 struct mwifiex_rx_reorder_tbl;
@@ -579,6 +582,7 @@ struct mwifiex_rx_reorder_tbl {
 	int win_size;
 	void **rx_reorder_ptr;
 	struct reorder_tmr_cnxt timer_context;
+	u8 amsdu;
 	u8 flags;
 };
 
@@ -668,6 +672,7 @@ struct mwifiex_if_ops {
 	int (*init_fw_port) (struct mwifiex_adapter *);
 	int (*dnld_fw) (struct mwifiex_adapter *, struct mwifiex_fw_image *);
 	void (*card_reset) (struct mwifiex_adapter *);
+	void (*fw_dump)(struct mwifiex_adapter *);
 	int (*clean_pcie_ring) (struct mwifiex_adapter *adapter);
 };
 
@@ -770,6 +775,7 @@ struct mwifiex_adapter {
 	u16 hs_activate_wait_q_woken;
 	wait_queue_head_t hs_activate_wait_q;
 	bool is_suspended;
+	bool hs_enabling;
 	u8 event_body[MAX_EVENT_SIZE];
 	u32 hw_dot_11n_dev_cap;
 	u8 hw_dev_mcs_support;
@@ -782,7 +788,6 @@ struct mwifiex_adapter {
 	struct mwifiex_wait_queue cmd_wait_q;
 	u8 scan_wait_q_woken;
 	spinlock_t queue_lock;		/* lock for tx queues */
-	struct completion fw_load;
 	u8 country_code[IEEE80211_COUNTRY_STRING_LEN];
 	u16 max_mgmt_ie_index;
 	u8 scan_delay_cnt;
@@ -802,6 +807,7 @@ struct mwifiex_adapter {
 	atomic_t pending_bridged_pkts;
 	struct semaphore *card_sem;
 	bool ext_scan;
+	u8 fw_api_ver;
 	u8 fw_key_api_major_ver, fw_key_api_minor_ver;
 };
 
