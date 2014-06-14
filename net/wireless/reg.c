@@ -43,6 +43,7 @@
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#define CONFIG_CFG80211_REG_DEBUG
 
 #include <linux/kernel.h>
 #include <linux/export.h>
