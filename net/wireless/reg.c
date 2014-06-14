@@ -396,6 +396,14 @@ static bool regdom_changes(const char *alpha2)
 	return !alpha2_equal(r->alpha2, alpha2);
 }
 
+static bool is_cfg80211_regdom_intersected(void)
+{
+	const struct ieee80211_regdomain *r = get_cfg80211_regdom();
+
+	if (!r)
+		return false;
+	return is_intersected_alpha2(r->alpha2);
+}
 /*
  * The NL80211_REGDOM_SET_BY_USER regdom alpha2 is cached, this lets
  * you know if a valid regulatory hint with NL80211_REGDOM_SET_BY_USER
@@ -1650,9 +1658,14 @@ __reg_process_hint_user(struct regulatory_request *user_request)
 	 */
 	if ((lr->initiator == NL80211_REGDOM_SET_BY_CORE ||
 	     lr->initiator == NL80211_REGDOM_SET_BY_DRIVER ||
-	     lr->initiator == NL80211_REGDOM_SET_BY_USER) &&
-	    regdom_changes(lr->alpha2))
-		return REG_REQ_IGNORE;
+	     lr->initiator == NL80211_REGDOM_SET_BY_USER)) {
+		if (lr->intersect) {
+			if (!is_cfg80211_regdom_intersected())
+				return REG_REQ_IGNORE;
+		} else if (regdom_changes(lr->alpha2)) {
+			return REG_REQ_IGNORE;
+		}
+	}
 
 	if (!regdom_changes(user_request->alpha2))
 		return REG_REQ_ALREADY_SET;
